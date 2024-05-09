@@ -21,7 +21,7 @@ type Response struct {
 
 func main() {
 
-	blockId, err := sendBlobTX("<RPC_URL>", data, privKey) // This was just added.
+	blockId, err := sendBlobTX("<RPC_URL>", data, privKey)
 	if err != nil {
 		log.Fatalln(err)
 	}

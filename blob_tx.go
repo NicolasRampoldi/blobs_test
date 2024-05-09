@@ -146,7 +146,7 @@ func sendBlobTX(rpcURL, data, privKey string) (*BlobTxResult, error) {
 
 	blockNumber := receipt.BlockNumber
 
-	// add 1
+	// Add one because the beacon root of the current block is the parent beacon root of the next block.
 	blockNumber.Add(blockNumber, big.NewInt(1))
 	block, err := client.BlockByNumber(context.Background(), blockNumber)
 
