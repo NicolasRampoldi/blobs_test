@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"math/big"
 	"regexp"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
@@ -105,20 +107,103 @@ func sendBlobTX(rpcURL, data, privKey string) (*BlobTxResult, error) {
 		return nil, fmt.Errorf("failed to get nonce: %s", err)
 	}
 
-	// Create the transaction with the blob data and cryptographic proofs
+	gasPrice, err := client.SuggestGasPrice(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get gas price: %s", err)
+	}
+
+	println("Gas price:", gasPrice.String())
+
+	gasTipCap, err := client.SuggestGasTipCap(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get gas tip cap: %s", err)
+	}
+
+	println("Gas tip cap:", gasTipCap.String())
+
+	lastBlock, err := client.BlockByNumber(context.Background(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get last block: %s", err)
+	}
+
+	excessBlobGas := *lastBlock.ExcessBlobGas()
+	calcBlobFee := eip4844.CalcBlobFee(excessBlobGas)
+	blobFeeCap := uint256.MustFromBig(calcBlobFee)
+
+	log.Println("blobFeeCap is: ", blobFeeCap)
+	blobFeeCap.Mul(blobFeeCap, uint256.NewInt(2))
+	log.Println("blobFeeCap will be send is: ", blobFeeCap)
+
+	tip := lastBlock.BaseFee().Mul(lastBlock.BaseFee(), big.NewInt(10))
+	log.Println("lastBlock.BaseFee() is: ", lastBlock.BaseFee())
+	log.Println("tip is:                 ", tip)
+
+	maxFeePerGas := lastBlock.BaseFee().Add(lastBlock.BaseFee(), tip)
+	log.Println("maxFeePerGas is:        ", maxFeePerGas)
+
+	blobGasUsed := *lastBlock.BlobGasUsed()
+	log.Println("blobGasUsed is:                 ", blobGasUsed)
+
+	transactions := lastBlock.Transactions()
+	count := 0
+
+	// Calculate the total number of blob txs
+	for _, tx := range transactions {
+		if tx.BlobHashes() != nil {
+			count++
+		}
+	}
+
+	var gas uint64
+
+	log.Println("count is:                 ", count)
+
+	if count == 0 {
+		gas = 100_000
+	} else {
+		gas = blobGasUsed / uint64(count)
+	}
+
+	log.Println("gas is:                 ", gas)
+
+	chainId, err := client.ChainID(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
 	tx := types.NewTx(&types.BlobTx{
-		ChainID:    uint256.MustFromBig(chainID),
+		ChainID:    uint256.MustFromBig(chainId),
 		Nonce:      nonce,
-		GasTipCap:  uint256.NewInt(1e10),       // max priority fee per gas
-		GasFeeCap:  uint256.NewInt(50e10),      // max fee per gas
-		Gas:        250000,                     // gas limit for the transaction
-		To:         common.HexToAddress("0x0"), // recipient's address
-		Value:      uint256.NewInt(0),          // value transferred in the transaction
-		Data:       nil,                        // No additional data is sent in this transaction
-		BlobFeeCap: uint256.NewInt(3e10),       // fee cap for the blob data
-		BlobHashes: sidecar.BlobHashes(),       // blob hashes in the transaction
-		Sidecar:    &sidecar,                   // sidecar data in the transaction
+		GasTipCap:  uint256.MustFromBig(tip),
+		GasFeeCap:  uint256.MustFromBig(maxFeePerGas),
+		Gas:        gas,
+		Value:      uint256.NewInt(0),
+		Data:       nil,
+		BlobFeeCap: blobFeeCap,
+		BlobHashes: sidecar.BlobHashes(),
+		Sidecar:    &sidecar,
 	})
+	log.Printf("Raw Tx is: %+v\n", tx)
+
+	// gasTipCapU, overflow := uint256.FromBig(gasTipCap)
+	// if overflow {
+	// 	return nil, fmt.Errorf("failed to convert gas tip cap to uint256: %s", err)
+	// }
+
+	// Create the transaction with the blob data and cryptographic proofs
+	// tx := types.NewTx(&types.BlobTx{
+	// 	ChainID:   uint256.MustFromBig(chainID),
+	// 	Nonce:     nonce,
+	// 	GasTipCap: gasTipCapU, // max priority fee per gas
+	// 	// GasFeeCap:  uint256.NewInt(50e10),      // max fee per gas
+	// 	Gas: gas, // gas limit for the transaction
+	// 	// To:  common.HexToAddress("0x0"), // recipient's address
+	// 	// Value:      uint256.NewInt(0),          // value transferred in the transaction
+	// 	// Data: nil, // No additional data is sent in this transaction
+	// 	// BlobFeeCap: uint256.NewInt(3e10),       // fee cap for the blob data
+	// 	BlobHashes: sidecar.BlobHashes(), // blob hashes in the transaction
+	// 	Sidecar:    &sidecar,             // sidecar data in the transaction
+	// })
 
 	// Sign the transaction with the sender's private key
 	signedTx, err := types.SignTx(tx, types.LatestSignerForChainID(chainID), ecdsaPrivateKey)
@@ -148,16 +233,16 @@ func sendBlobTX(rpcURL, data, privKey string) (*BlobTxResult, error) {
 
 	// Add one because the beacon root of the current block is the parent beacon root of the next block.
 	blockNumber.Add(blockNumber, big.NewInt(1))
+	time.Sleep(12 * time.Second)
 	block, err := client.BlockByNumber(context.Background(), blockNumber)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get block: %s", err)
+	}
 
 	println("Block number: ", block.NumberU64())
 	// Parent beacon root and beacon root are the same
 	println("Parent beacon root: ", block.Header().ParentBeaconRoot.String())
 	println("Beacon root", block.BeaconRoot().String())
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to get block: %s", err)
-	}
 
 	res := &BlobTxResult{
 		BeaconRoot:       block.Header().ParentBeaconRoot,
